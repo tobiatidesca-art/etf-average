@@ -67,11 +67,19 @@ def build_testo(pa):
     if not pa:
         return 'Nessuna posizione aperta al momento.\n\n' + GITHUB_PAGES_URL
 
+    def _spy_ma_line(spy, mav, ma):
+        if spy is None or mav is None or ma == 0:
+            return ''
+        diff  = spy - mav
+        icon  = '📈' if diff >= 0 else '📉'
+        segno = '+' if diff >= 0 else ''
+        return f'{icon}  SPY vs MA{ma}: ${spy:,.2f} vs ${mav:,.2f}  ({segno}{diff:,.2f} punti)\n'
+
     if pa.get('filtrato_ma'):
         ma  = pa['ma_periodi']
         spy = pa.get('spy_prezzo')
         mav = pa.get('spy_ma')
-        spy_line = f'📉  SPY oggi:  ${spy:,.2f}\n📊  MA{ma}:      ${mav:,.2f}' if spy and mav else ''
+        spy_line = _spy_ma_line(spy, mav, ma)
         return (
             f'━━━━━━━━━━━━━━━━━━━━━━━\n'
             f'📊 ETF AVERAGE — {pa["data_acquisto"][:7]}\n'
@@ -79,7 +87,7 @@ def build_testo(pa):
             f'\n'
             f'🚫  Filtro MA{ma} attivo — nessuna posizione\n'
             f'\n'
-            + (spy_line + '\n\n' if spy_line else '')
+            + (spy_line + '\n' if spy_line else '')
             + f'Il sistema non opera finché SPY è sotto\n'
             f'la media mobile a {ma} periodi daily.\n'
             f'\n'
@@ -90,6 +98,7 @@ def build_testo(pa):
     rend      = pa['ritorno_parziale']
     rend_icon = '📈' if rend >= 0 else '📉'
     etf       = pa['etf']
+    spy_ma_line = _spy_ma_line(pa.get('spy_prezzo'), pa.get('spy_ma'), pa.get('ma_periodi', 0))
 
     titoli_lines = []
     for t in pa['dettaglio']:
@@ -110,6 +119,8 @@ def build_testo(pa):
         f"📅  Acquisto:         {pa['data_acquisto']}\n"
         f"🕐  Aggiornato al:    {pa['data_oggi']}\n"
         f"\n"
+        + spy_ma_line
+        + f"\n"
         f"💰  Investito:   {pa['capitale_investito']:>14,.0f} €\n"
         f"💵  Valore oggi: {pa['valore_attuale']:>14,.0f} €\n"
         f"{rend_icon}  Rendimento: {rend:>+13.2f}%\n"

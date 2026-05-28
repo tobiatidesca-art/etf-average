@@ -324,18 +324,17 @@ def calcola_posizione_aperta(data, risultati):
     capitale_corrente = risultati[-1]['capitale_fine']
 
     # ── 0. Filtro SP500 MA sul mese corrente ──────────────────────────────
-    if MA_SP500_PERIODI > 0:
-        spy_pr = prezzo_alla_data(data, 'SPY', d_acquisto)
-        spy_ma = calcola_ma_spy(data, d_acquisto, MA_SP500_PERIODI)
-        if spy_pr is None or spy_ma is None or spy_pr < spy_ma:
-            return {
-                'filtrato_ma':  True,
-                'ma_periodi':   MA_SP500_PERIODI,
-                'spy_prezzo':   round(spy_pr, 2) if spy_pr is not None else None,
-                'spy_ma':       round(spy_ma, 2) if spy_ma is not None else None,
-                'data_acquisto': d_acquisto.strftime('%Y-%m-%d'),
-                'data_oggi':    DATA_OGGI.strftime('%Y-%m-%d'),
-            }
+    spy_pr = prezzo_alla_data(data, 'SPY', d_acquisto)
+    spy_ma = calcola_ma_spy(data, d_acquisto, MA_SP500_PERIODI) if MA_SP500_PERIODI > 0 else None
+    if MA_SP500_PERIODI > 0 and (spy_pr is None or spy_ma is None or spy_pr < spy_ma):
+        return {
+            'filtrato_ma':  True,
+            'ma_periodi':   MA_SP500_PERIODI,
+            'spy_prezzo':   round(spy_pr, 2) if spy_pr is not None else None,
+            'spy_ma':       round(spy_ma, 2) if spy_ma is not None else None,
+            'data_acquisto': d_acquisto.strftime('%Y-%m-%d'),
+            'data_oggi':    DATA_OGGI.strftime('%Y-%m-%d'),
+        }
 
     # ── 1. Miglior ETF singolo ────────────────────────────────────────────
     etf_ritorni = {}
@@ -427,6 +426,9 @@ def calcola_posizione_aperta(data, risultati):
         'dettaglio':         dettaglio,
         'tutti_etf':         {k: round(v, 2) for k, v in etf_ritorni.items()},
         'stocks_all':        stocks_all_pa,
+        'spy_prezzo':        round(spy_pr, 2) if spy_pr is not None else None,
+        'spy_ma':            round(spy_ma, 2) if spy_ma is not None else None,
+        'ma_periodi':        MA_SP500_PERIODI,
     }
 
 

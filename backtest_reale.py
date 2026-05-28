@@ -19,11 +19,13 @@ parser = argparse.ArgumentParser(description='Backtest ETF Momentum')
 parser.add_argument('--n_titoli',  type=int,   default=4,     help='Numero titoli per mese (1-4)')
 parser.add_argument('--capitale',  type=float, default=10000, help='Capitale per titolo (EUR)')
 parser.add_argument('--costo',     type=float, default=0.0,   help='Costo ingresso %% per trade (es. 0.1)')
+parser.add_argument('--ma_sp500',  type=int,   default=0,     help='Periodi MA daily SP500 per filtro entrate (0=disabilitato)')
 args = parser.parse_args()
 
 N_TITOLI            = max(1, min(4, args.n_titoli))
 CAPITALE_PER_TITOLO = args.capitale
 COSTO_INGRESSO_PCT  = args.costo
+MA_SP500_PERIODI    = max(0, args.ma_sp500)
 
 # ── Global constants ──────────────────────────────────────────────────────────
 DATA_INIZIO   = date(2000, 1, 1)
@@ -115,6 +117,20 @@ def ritorno_pct(prezzo_inizio, prezzo_fine):
     return (prezzo_fine - prezzo_inizio) / prezzo_inizio * 100
 
 
+def calcola_ma_spy(data, target_date, periodi):
+    """Media mobile semplice daily di SPY sui 'periodi' giorni prima di target_date."""
+    if periodi <= 0 or 'SPY' not in data.columns:
+        return None
+    series = data['SPY'].dropna()
+    if series.empty:
+        return None
+    target = pd.Timestamp(target_date)
+    idx = int(series.index.searchsorted(target, side='left'))
+    if idx < periodi:
+        return None
+    return float(series.iloc[idx - periodi:idx].mean())
+
+
 # ── Backtest ──────────────────────────────────────────────────────────────────
 def run_backtest(data):
     risultati    = []
@@ -126,6 +142,16 @@ def run_backtest(data):
         d_acquisto     = cur
         d_vendita      = cur + relativedelta(months=1)
         d_lookback     = cur - relativedelta(months=LOOKBACK_MESI)
+
+        # ── 0. Filtro SP500 MA ────────────────────────────────────────────
+        filtrato_ma = False
+        if MA_SP500_PERIODI > 0:
+            spy_pr = prezzo_alla_data(data, 'SPY', d_acquisto)
+            spy_ma = calcola_ma_spy(data, d_acquisto, MA_SP500_PERIODI)
+            if spy_pr is None or spy_ma is None:
+                filtrato_ma = True   # dati insufficienti per la MA → non operare
+            else:
+                filtrato_ma = spy_pr < spy_ma
 
         # ── 1. Miglior ETF singolo (3 mesi di lookback) ──────────────────
         etf_ritorni = {}
@@ -211,21 +237,38 @@ def run_backtest(data):
         rit_portfolio  = sum(rendimenti_netti) / len(rendimenti_netti)
         capitale_fine  = capitale * (1 + rit_portfolio / 100)
 
-        risultati.append({
-            'data':             d_acquisto.strftime('%Y-%m-%d'),
-            'etf':              miglior_etf,
-            'etf_ritorno_3m':   round(miglior_etf_ret, 2),
-            'top_stocks':       [d['ticker'] for d in dettaglio],
-            'capitale_inizio':  round(capitale, 2),
-            'ritorno_mese_pct': round(rit_portfolio, 2),
-            'capitale_fine':    round(capitale_fine, 2),
-            'dettaglio':        dettaglio,
-            'tutti_etf':        {k: round(v, 2) for k, v in etf_ritorni.items()},
-            'stocks_all':       stocks_all,
-        })
+        if filtrato_ma:
+            # Mese filtrato: stocks_all calcolato per il JS dinamico, ma capitale non cambia
+            risultati.append({
+                'data':             d_acquisto.strftime('%Y-%m-%d'),
+                'etf':              miglior_etf,
+                'etf_ritorno_3m':   round(miglior_etf_ret, 2),
+                'filtrato_ma':      True,
+                'top_stocks':       [],
+                'dettaglio':        [],
+                'tutti_etf':        {k: round(v, 2) for k, v in etf_ritorni.items()},
+                'stocks_all':       stocks_all,
+                'capitale_inizio':  round(capitale, 2),
+                'ritorno_mese_pct': 0.0,
+                'capitale_fine':    round(capitale, 2),
+            })
+        else:
+            risultati.append({
+                'data':             d_acquisto.strftime('%Y-%m-%d'),
+                'etf':              miglior_etf,
+                'etf_ritorno_3m':   round(miglior_etf_ret, 2),
+                'filtrato_ma':      False,
+                'top_stocks':       [d['ticker'] for d in dettaglio],
+                'capitale_inizio':  round(capitale, 2),
+                'ritorno_mese_pct': round(rit_portfolio, 2),
+                'capitale_fine':    round(capitale_fine, 2),
+                'dettaglio':        dettaglio,
+                'tutti_etf':        {k: round(v, 2) for k, v in etf_ritorni.items()},
+                'stocks_all':       stocks_all,
+            })
+            capitale = capitale_fine
 
-        capitale = capitale_fine
-        cur      = d_vendita
+        cur = d_vendita
 
     # statistiche globali
     cap_iniziale   = CAPITALE_PER_TITOLO * N_TITOLI
@@ -484,16 +527,35 @@ def build_perf_matrix(risultati):
         y, m = d.year, d.month
         if y not in matrix:
             matrix[y] = {}
-        matrix[y][m] = mese['ritorno_mese_pct']
+        # None = mese filtrato dal filtro MA (non operativo)
+        if mese.get('filtrato_ma', False):
+            matrix[y][m] = None
+        else:
+            matrix[y][m] = mese['ritorno_mese_pct']
 
     annual_returns = {}
     for y, months_dict in matrix.items():
         prod = 1.0
         for v in months_dict.values():
-            prod *= (1 + v / 100)
+            if v is not None:               # i mesi filtrati non entrano nel composto
+                prod *= (1 + v / 100)
         annual_returns[y] = round((prod - 1) * 100, 2)
 
     return matrix, annual_returns
+
+
+def build_spy_daily(data):
+    """Serie daily di SPY (date + prezzi) per il grafico SP500/MA e il filtro client-side."""
+    if 'SPY' not in data.columns:
+        return {'dates': [], 'prices': []}
+    series = data['SPY'].dropna()
+    start  = pd.Timestamp(DATA_INIZIO - relativedelta(months=LOOKBACK_MESI + 2))
+    end    = pd.Timestamp(DATA_OGGI)
+    sub    = series[(series.index >= start) & (series.index <= end)]
+    return {
+        'dates':  [d.strftime('%Y-%m-%d') for d in sub.index],
+        'prices': [round(float(p), 2) for p in sub.values],
+    }
 
 
 # ── HTML Generator ────────────────────────────────────────────────────────────
@@ -524,9 +586,11 @@ def _build_perf_matrix_html(perf_matrix, annual_returns):
     for y in years:
         rows += f'<tr><td>{y}</td>'
         for m in range(1, 13):
-            v = perf_matrix[y].get(m)
-            if v is None:
+            v = perf_matrix[y].get(m, 'MISSING')
+            if v == 'MISSING':
                 rows += '<td class="pm-empty">&#x2014;</td>'
+            elif v is None:
+                rows += '<td class="pm-filtered" title="Filtrato: SPY &lt; MA">&#x1F6AB;</td>'
             else:
                 style = _cell_color(v)
                 sign  = '+' if v >= 0 else ''
@@ -552,7 +616,7 @@ def _build_perf_matrix_html(perf_matrix, annual_returns):
 
 def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals, max_dd,
                 ticker_charts, perf_matrix, annual_returns, posizione_aperta=None,
-                mesi_raw_js=None, sp500_norm_js=None, pos_raw_js=None):
+                mesi_raw_js=None, sp500_norm_js=None, pos_raw_js=None, spy_daily=None):
 
     def fmt_pct(v, decimals=2):
         if v is None:
@@ -695,9 +759,10 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
     tc_js         = json.dumps(ticker_charts)
     costo_js      = json.dumps(COSTO_INGRESSO_PCT)
     mesi_raw_js_s = json.dumps(mesi_raw_js if mesi_raw_js is not None else [])
-    isin_map_js   = json.dumps(ISIN_MAP)
     sp500_norm_js_s = json.dumps(sp500_norm_js)
     pos_raw_js_s  = json.dumps(pos_raw_js)
+    isin_map_js   = json.dumps(ISIN_MAP)
+    spy_daily_js  = json.dumps(spy_daily if spy_daily else {'dates': [], 'prices': []})
     data_fine_lab = cap_labs[-1] if cap_labs else ''
 
     # ── stat card colors ───────────────────────────────────────────────────────
@@ -768,6 +833,8 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         '.perf-matrix td:first-child{text-align:left;color:var(--muted);font-weight:400}\n'
         '.pm-empty{color:rgba(139,148,158,0.3) !important;background:transparent !important}\n'
         '.pm-annual{border-left:2px solid var(--border) !important;font-weight:700 !important}\n'
+        '.pm-filtered{background:repeating-linear-gradient(135deg,#161b22 0,#161b22 3px,#1c2330 3px,#1c2330 7px) !important;color:#3d444d !important;font-size:0.85rem}\n'
+        '.tr-filtered td{opacity:0.45;font-style:italic}\n'
         '.table-wrap{margin:0 40px 40px;overflow-x:auto}\n'
         '.main-table{width:100%;border-collapse:collapse;font-size:0.82rem}\n'
         '.main-table th{padding:10px 12px;text-align:left;color:var(--muted);font-size:0.72rem;text-transform:uppercase;border-bottom:2px solid var(--border);white-space:nowrap}\n'
@@ -823,11 +890,13 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         '<body>\n'
         '\n'
         '<header>\n'
-        '  <div class="h-title">Backtest ETF Momentum 2015-2026</div>\n'
-        f'  <div class="h-sub">Top-{N_TITOLI} ETF per momentum 3m &nbsp;|&nbsp; '
+        '  <div class="h-info">\n'
+        '    <div class="h-title">Backtest ETF Momentum 2015-2026</div>\n'
+        f'    <div class="h-sub">Top-{N_TITOLI} ETF per momentum 3m &nbsp;|&nbsp; '
         f'Capitale: {CAPITALE_PER_TITOLO:,.0f} &#x20AC; per titolo &nbsp;|&nbsp; '
         f'Costo ingresso: {COSTO_INGRESSO_PCT}%</div>\n'
-        f'  <div class="h-meta">Aggiornato al {DATA_OGGI.strftime("%d/%m/%Y")}</div>\n'
+        f'    <div class="h-meta">Aggiornato al {DATA_OGGI.strftime("%d/%m/%Y")}</div>\n'
+        '  </div>\n'
         '</header>\n'
         '\n'
         '<div class="controls-panel">\n'
@@ -846,6 +915,14 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         '  <div class="ctrl-group">\n'
         '    <label>Commissioni ingresso (%)</label>\n'
         f'    <input type="number" class="ctrl-input" id="ctrl-costo" value="{COSTO_INGRESSO_PCT}" min="0" max="5" step="0.05" oninput="onCtrl()">\n'
+        '  </div>\n'
+        '  <div class="ctrl-group">\n'
+        '    <label>Filtro SP500 MA (periodi daily)</label>\n'
+        '    <div class="ctrl-row">\n'
+        f'      <input type="range" id="ctrl-ma" min="0" max="500" value="{MA_SP500_PERIODI}" step="10" oninput="onCtrl()">\n'
+        f'      <span class="ctrl-num" id="ctrl-ma-lbl">{MA_SP500_PERIODI if MA_SP500_PERIODI > 0 else "OFF"}</span>\n'
+        '    </div>\n'
+        '    <div class="ctrl-note">0 = filtro disabilitato (sempre in mercato)</div>\n'
         '  </div>\n'
         '  <div class="ctrl-group">\n'
         '    <label>Data inizio backtest</label>\n'
@@ -904,6 +981,14 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         '  </div>\n'
         '</div>\n'
         '\n'
+        '<div class="dd-chart-wrap">\n'
+        '  <h3>S&amp;P 500 (SPY) vs MA <span id="spy-ma-label" style="color:#f0c040"></span> periodi daily'
+        ' &nbsp;<span id="spy-filter-status" style="font-size:0.75rem;color:var(--muted)"></span></h3>\n'
+        '  <div style="position:relative;height:180px">\n'
+        '    <canvas id="spyChart"></canvas>\n'
+        '  </div>\n'
+        '</div>\n'
+        '\n'
         + '<div id="matrix-container">' + perf_matrix_html + '</div>\n'
         '\n'
         '<div class="table-wrap">\n'
@@ -945,6 +1030,8 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         f'const COSTO_PCT     = {costo_js};\n'
         f'const MESI_RAW      = {mesi_raw_js_s};\n'
         f'const ISIN_MAP      = {isin_map_js};\n'
+        f'const SPY_DAILY     = {spy_daily_js};\n'
+        f'const MA_SP500_DEF  = {MA_SP500_PERIODI};\n'
         f'const SP500_NORM    = {sp500_norm_js_s};\n'
         f'const POS_RAW       = {pos_raw_js_s};\n'
         f'const PARAMS_DEFAULT = {{n: {N_TITOLI}, cap: {CAPITALE_PER_TITOLO:.0f}, costo: {COSTO_INGRESSO_PCT}}};\n'
@@ -1132,16 +1219,134 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         '  return (v>=0?"+":"")+v.toLocaleString("it-IT",{minimumFractionDigits:2,maximumFractionDigits:2})+" \\u20AC";\n'
         '}\n'
         '\n'
+        '// ── Filtro SP500 MA ───────────────────────────────────────────────────────\n'
+        '// Indice mese → primo indice in SPY_DAILY (calcolato una volta)\n'
+        'const _spyMonthIdx = (() => {\n'
+        '  const map = {};\n'
+        '  for (let i = 0; i < SPY_DAILY.dates.length; i++) {\n'
+        '    const ym = SPY_DAILY.dates[i].slice(0,7);\n'
+        '    if (!(ym in map)) map[ym] = i;\n'
+        '  }\n'
+        '  return map;\n'
+        '})();\n'
+        '\n'
+        'function computeFilteredMonths(maPeriodi) {\n'
+        '  const filtered = new Set();\n'
+        '  if (maPeriodi <= 0) return filtered;\n'
+        '  const prices = SPY_DAILY.prices;\n'
+        '  for (const m of MESI_RAW) {\n'
+        '    const ym = m.data.slice(0,7);\n'
+        '    const idx = _spyMonthIdx[ym];\n'
+        '    if (idx === undefined || idx < maPeriodi) { filtered.add(ym); continue; }\n'
+        '    const spyPr = prices[idx];\n'
+        '    let sum = 0;\n'
+        '    for (let j = idx - maPeriodi; j < idx; j++) sum += prices[j];\n'
+        '    if (spyPr < sum / maPeriodi) filtered.add(ym);\n'
+        '  }\n'
+        '  return filtered;\n'
+        '}\n'
+        '\n'
+        '// ── Grafico SPY + MA ──────────────────────────────────────────────────────\n'
+        'let spyChartInstance = null;\n'
+        '\n'
+        'function initSpyChart() {\n'
+        '  const ctx = document.getElementById("spyChart").getContext("2d");\n'
+        '  spyChartInstance = new Chart(ctx, {\n'
+        '    type: "line",\n'
+        '    data: { labels: [], datasets: [\n'
+        '      { label: "SPY", data: [], borderColor: "#58a6ff", backgroundColor: "rgba(88,166,255,0.04)",\n'
+        '        fill: true, tension: 0.1, borderWidth: 1.5, pointRadius: 0 },\n'
+        '      { label: "MA", data: [], borderColor: "#f0c040", backgroundColor: "transparent",\n'
+        '        fill: false, tension: 0.1, borderWidth: 1.5, pointRadius: 0, borderDash: [4,3] },\n'
+        '    ]},\n'
+        '    options: {\n'
+        '      responsive: true, maintainAspectRatio: false,\n'
+        '      animation: false,\n'
+        '      plugins: {\n'
+        '        legend: { labels: { color: "#8b949e", font: { size: 10 } } },\n'
+        '        tooltip: { backgroundColor:"#161b22", borderColor:"#30363d", borderWidth:1,\n'
+        '          titleColor:"#e6edf3", bodyColor:"#8b949e",\n'
+        '          callbacks: { label: c => c.dataset.label + ": $" + c.raw.toFixed(2) } }\n'
+        '      },\n'
+        '      scales: {\n'
+        '        x: { ticks: { color:"#8b949e", maxTicksLimit:10, font:{size:9} }, grid:{color:"rgba(48,54,61,0.4)"} },\n'
+        '        y: { ticks: { color:"#8b949e", font:{size:9}, callback: v => "$"+v.toFixed(0) }, grid:{color:"rgba(48,54,61,0.4)"} }\n'
+        '      }\n'
+        '    }\n'
+        '  });\n'
+        '}\n'
+        '\n'
+        'function updateSpyChart(maPeriodi) {\n'
+        '  if (!spyChartInstance) return;\n'
+        '  const dates = SPY_DAILY.dates;\n'
+        '  const prices = SPY_DAILY.prices;\n'
+        '  const maVals = [];\n'
+        '  for (let i = 0; i < prices.length; i++) {\n'
+        '    if (maPeriodi > 0 && i >= maPeriodi) {\n'
+        '      let sum = 0;\n'
+        '      for (let j = i - maPeriodi; j < i; j++) sum += prices[j];\n'
+        '      maVals.push(Math.round(sum/maPeriodi*100)/100);\n'
+        '    } else {\n'
+        '      maVals.push(null);\n'
+        '    }\n'
+        '  }\n'
+        '  spyChartInstance.data.labels = dates;\n'
+        '  spyChartInstance.data.datasets[0].data = prices;\n'
+        '  spyChartInstance.data.datasets[1].data = maPeriodi > 0 ? maVals : [];\n'
+        '  spyChartInstance.data.datasets[1].label = maPeriodi > 0 ? `MA${maPeriodi}` : "";\n'
+        '  // Plugin per colorare zone sotto la MA\n'
+        '  spyChartInstance.options.plugins.spyZones = { maVals, prices };\n'
+        '  spyChartInstance.update();\n'
+        '}\n'
+        '\n'
+        '// Plugin per zone rosse (SPY < MA)\n'
+        'const spyZonePlugin = {\n'
+        '  id: "spyZones",\n'
+        '  beforeDraw(chart) {\n'
+        '    const opts = chart.options.plugins.spyZones;\n'
+        '    if (!opts || !opts.maVals || !opts.maVals.length) return;\n'
+        '    const { ctx, scales: {x, y}, chartArea } = chart;\n'
+        '    const { maVals, prices } = opts;\n'
+        '    ctx.save();\n'
+        '    ctx.fillStyle = "rgba(255,77,109,0.12)";\n'
+        '    let inZone = false, zoneStart = 0;\n'
+        '    for (let i = 0; i < maVals.length; i++) {\n'
+        '      const below = maVals[i] !== null && prices[i] < maVals[i];\n'
+        '      if (below && !inZone) { inZone = true; zoneStart = i; }\n'
+        '      if (!below && inZone) {\n'
+        '        const x1 = x.getPixelForValue(zoneStart);\n'
+        '        const x2 = x.getPixelForValue(i);\n'
+        '        ctx.fillRect(x1, chartArea.top, x2-x1, chartArea.height);\n'
+        '        inZone = false;\n'
+        '      }\n'
+        '    }\n'
+        '    if (inZone) {\n'
+        '      const x1 = x.getPixelForValue(zoneStart);\n'
+        '      const x2 = x.getPixelForValue(maVals.length-1);\n'
+        '      ctx.fillRect(x1, chartArea.top, x2-x1, chartArea.height);\n'
+        '    }\n'
+        '    ctx.restore();\n'
+        '  }\n'
+        '};\n'
+        'Chart.register(spyZonePlugin);\n'
+        '\n'
         'function recalcola() {\n'
         '  const n_titoli  = parseInt(document.getElementById("ctrl-n").value) || 4;\n'
         '  const cap_t     = parseFloat(document.getElementById("ctrl-cap").value) || 10000;\n'
         '  const costo_pct = parseFloat(document.getElementById("ctrl-costo").value) || 0;\n'
+        '  const ma_p      = parseInt(document.getElementById("ctrl-ma").value) || 0;\n'
         '  document.getElementById("ctrl-n-lbl").textContent = n_titoli;\n'
+        '  document.getElementById("ctrl-ma-lbl").textContent = ma_p > 0 ? ma_p : "OFF";\n'
+        '  const spyLbl = document.getElementById("spy-ma-label");\n'
+        '  if (spyLbl) spyLbl.textContent = ma_p > 0 ? ma_p : "OFF";\n'
         '  // Filtro date\n'
         '  const ds = document.getElementById("ctrl-date-start").value;  // "YYYY-MM"\n'
         '  const de = document.getElementById("ctrl-date-end").value;\n'
         '  const dateStart = ds ? ds + "-01" : "0000-01-01";\n'
         '  const dateEnd   = de ? de + "-31" : "9999-12-31";\n'
+        '\n'
+        '  // Calcola mesi filtrati dal filtro SP500 MA\n'
+        '  const filteredSet = computeFilteredMonths(ma_p);\n'
         '\n'
         '  let capitale      = n_titoli * cap_t;\n'
         '  const cap_iniziale = capitale;\n'
@@ -1151,6 +1356,19 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         '\n'
         '  for (const m of MESI_RAW) {\n'
         '    if (m.data < dateStart || m.data > dateEnd) continue;\n'
+        '    const ym = m.data.slice(0,7);\n'
+        '    // ── Mese filtrato SP500 MA ─────────────────────────────────────\n'
+        '    if (ma_p > 0 && filteredSet.has(ym)) {\n'
+        '      eq_labs.push(ym);\n'
+        '      eq_vals.push(Math.round(capitale*100)/100);\n'
+        '      mesi_out.push({\n'
+        '        data: m.data, etf: "", etf_ret_3m: 0, tutti_etf: {},\n'
+        '        cap_inizio: Math.round(capitale*100)/100,\n'
+        '        cap_fine:   Math.round(capitale*100)/100,\n'
+        '        rit_medio:  0, stocks: [], filtrato: true,\n'
+        '      });\n'
+        '      continue;\n'
+        '    }\n'
         '    const top = m.stocks_all.slice(0, n_titoli);\n'
         '    if (top.length === 0) continue;\n'
         '    const cap_per_t = capitale / n_titoli;\n'
@@ -1178,6 +1396,7 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         '      cap_fine:   Math.round(cap_fine*100)/100,\n'
         '      rit_medio:  Math.round(rit_medio*100)/100,\n'
         '      stocks: stocks_calc.sort((a,b)=>b.ret_netto-a.ret_netto),\n'
+        '      filtrato: false,\n'
         '    });\n'
         '    capitale = cap_fine;\n'
         '  }\n'
@@ -1269,10 +1488,16 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         '  rebuildPosAperta(pos_aperta);\n'
         '\n'
         '  // Rebuild table\n'
-        '  rebuildTable(mesi_out, n_titoli, cap_t, costo_pct);\n'
+        '  rebuildTable(mesi_out, n_titoli, cap_t, costo_pct, ma_p);\n'
         '\n'
         '  // Rebuild matrix\n'
         '  rebuildMatrix(mesi_out);\n'
+        '\n'
+        '  // Aggiorna grafico SPY+MA\n'
+        '  updateSpyChart(ma_p);\n'
+        '  const nFilt = mesi_out.filter(m=>m.filtrato).length;\n'
+        '  const stEl = document.getElementById("spy-filter-status");\n'
+        '  if (stEl) stEl.textContent = ma_p>0 ? `— ${nFilt} mes${nFilt===1?"e":"i"} filtrat${nFilt===1?"o":"i"}` : "— filtro disabilitato";\n'
         '}\n'
         '\n'
         '// Store current chart data\n'
@@ -1338,12 +1563,23 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         '  </div>`;\n'
         '}\n'
         '\n'
-        'function rebuildTable(mesi_out, n_titoli, cap_t, costo_pct) {\n'
+        'function rebuildTable(mesi_out, n_titoli, cap_t, costo_pct, ma_p) {\n'
         '  const tbody = document.getElementById("tbody-main");\n'
         '  if (!tbody) return;\n'
         '  let html = "";\n'
         '  for (let i = mesi_out.length-1; i >= 0; i--) {\n'
         '    const m = mesi_out[i];\n'
+        '    // ── Riga mese filtrato ─────────────────────────────────────────────\n'
+        '    if (m.filtrato) {\n'
+        '      html += `<tr class="tr-main tr-filtered">\n'
+        '        <td>${m.data.slice(0,7)}</td>\n'
+        '        <td><span style="color:#3d444d">🚫</span></td>\n'
+        '        <td colspan="3" style="color:#3d444d;text-align:center;font-size:0.78rem">'
+        'SPY sotto MA${ma_p} &mdash; nessuna operazione</td>\n'
+        '        <td style="color:#3d444d">${m.cap_fine.toLocaleString("it-IT",{maximumFractionDigits:0})} \\u20AC</td>\n'
+        '      </tr>`;\n'
+        '      continue;\n'
+        '    }\n'
         '    const rc = m.rit_medio >= 0 ? "#00c897" : "#ff4d6d";\n'
         '    const etf_str = Object.entries(m.tutti_etf)\n'
         '      .sort((a,b)=>b[1]-a[1])\n'
@@ -1408,7 +1644,7 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         '    const y = parseInt(m.data.slice(0,4));\n'
         '    const mo = parseInt(m.data.slice(5,7));\n'
         '    if (!by_year[y]) by_year[y] = {};\n'
-        '    by_year[y][mo] = m.rit_medio;\n'
+        '    by_year[y][mo] = { v: m.rit_medio, filtrato: !!m.filtrato };\n'
         '  }\n'
         '  const years = Object.keys(by_year).map(Number).sort();\n'
         '  const MESI_IT = ["","Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"];\n'
@@ -1418,12 +1654,14 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         '    let ann = 1;\n'
         '    let row = `<tr><td>${y}</td>`;\n'
         '    for (let mo=1; mo<=12; mo++) {\n'
-        '      const v = by_year[y][mo];\n'
-        '      if (v === undefined) {\n'
+        '      const entry = by_year[y][mo];\n'
+        '      if (!entry) {\n'
         '        row += \'<td class="pm-empty">\\u2014</td>\';\n'
+        '      } else if (entry.filtrato) {\n'
+        '        row += \'<td class="pm-filtered" title="Filtrato: SPY &lt; MA">\\uD83D\\uDEAB</td>\';\n'
         '      } else {\n'
-        '        ann *= (1 + v/100);\n'
-        '        row += `<td style="${cellColorStyle(v)}">${fmtPct(v,1)}</td>`;\n'
+        '        ann *= (1 + entry.v/100);\n'
+        '        row += `<td style="${cellColorStyle(entry.v)}">${fmtPct(entry.v,1)}</td>`;\n'
         '      }\n'
         '    }\n'
         '    const ann_pct = Math.round((ann-1)*10000)/100;\n'
@@ -1452,6 +1690,8 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         '  ds.min = minM; ds.max = maxM; ds.value = minM;\n'
         '  de.min = minM; de.max = maxM; de.value = maxM;\n'
         '})();\n'
+        '// Inizializza grafico SPY\n'
+        'initSpyChart();\n'
         '// Run initial calculation\n'
         'recalcola();\n'
         '\n'
@@ -1565,6 +1805,41 @@ def genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals, drawdown_vals,
         'document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });\n'
         'document.getElementById("modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });\n'
         '\n'
+        'async function sendTelegram() {\n'
+        '  const btn = document.querySelector(".tg-btn");\n'
+        '  const st  = document.getElementById("act-status");\n'
+        '  btn.disabled = true; btn.textContent = "Invio...";\n'
+        '  try {\n'
+        '    const r = await fetch("/api/telegram", {method:"POST"});\n'
+        '    const d = await r.json();\n'
+        '    if (d.ok) { btn.textContent = "Inviato!"; st.textContent = "Messaggio inviato su Telegram."; }\n'
+        '    else { btn.textContent = "Errore"; st.textContent = d.error || "Errore sconosciuto"; }\n'
+        '  } catch(e) {\n'
+        '    btn.textContent = "Server off"; st.textContent = "Avvia avvia_server.bat per usare i bottoni.";\n'
+        '  }\n'
+        '  setTimeout(() => { btn.innerHTML = "&#x1F4F1; Invia Telegram"; btn.disabled = false; }, 3500);\n'
+        '}\n'
+        '\n'
+        'async function aggiornaBacktest() {\n'
+        '  const btn = document.querySelector(".upd-btn");\n'
+        '  const st  = document.getElementById("act-status");\n'
+        '  btn.disabled = true; btn.textContent = "Aggiornamento...";\n'
+        '  st.textContent = "Download dati da Yahoo Finance (1-2 min)...";\n'
+        '  try {\n'
+        '    const r = await fetch("/api/aggiorna", {method:"POST"});\n'
+        '    const d = await r.json();\n'
+        '    if (d.ok) {\n'
+        '      btn.textContent = "Fatto!"; st.textContent = "Dati aggiornati. Ricarico...";\n'
+        '      setTimeout(() => location.reload(), 1500);\n'
+        '    } else {\n'
+        '      btn.textContent = "Errore"; st.textContent = "Errore durante aggiornamento.";\n'
+        '      setTimeout(() => { btn.innerHTML = "&#x1F504; Aggiorna dati"; btn.disabled = false; }, 4000);\n'
+        '    }\n'
+        '  } catch(e) {\n'
+        '    btn.textContent = "Server off"; st.textContent = "Avvia avvia_server.bat per usare i bottoni.";\n'
+        '    setTimeout(() => { btn.innerHTML = "&#x1F504; Aggiorna dati"; btn.disabled = false; }, 4000);\n'
+        '  }\n'
+        '}\n'
         '</script>\n'
         '</body>\n'
         '</html>\n'
@@ -1610,6 +1885,7 @@ if __name__ == '__main__':
     sp500_vals    = get_sp500_normalizzato(data, cap_labs, stats['cap_iniziale'])
     ticker_charts = build_ticker_charts(data, risultati, pos_aperta)
     perf_matrix, annual_returns = build_perf_matrix(risultati)
+    spy_daily     = build_spy_daily(data)
 
     with open('backtest_risultati.json', 'w', encoding='utf-8') as f:
         json.dump(
@@ -1622,11 +1898,12 @@ if __name__ == '__main__':
     mesi_raw_js = []
     for r in risultati:
         mesi_raw_js.append({
-            'data':        r['data'],
-            'etf':         r['etf'],
-            'etf_ret_3m':  r['etf_ritorno_3m'],
-            'tutti_etf':   r['tutti_etf'],
-            'stocks_all':  r.get('stocks_all', []),
+            'data':         r['data'],
+            'etf':          r['etf'],
+            'etf_ret_3m':   r['etf_ritorno_3m'],
+            'tutti_etf':    r['tutti_etf'],
+            'stocks_all':   r.get('stocks_all', []),
+            'filtrato_ma':  r.get('filtrato_ma', False),
         })
 
     # Build SP500_NORM (normalized to 1.0)
@@ -1651,6 +1928,7 @@ if __name__ == '__main__':
     genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals,
                 drawdown_vals, max_dd, ticker_charts, perf_matrix,
                 annual_returns, pos_aperta,
-                mesi_raw_js=mesi_raw_js, sp500_norm_js=sp500_norm_js, pos_raw_js=pos_raw_js)
+                mesi_raw_js=mesi_raw_js, sp500_norm_js=sp500_norm_js,
+                pos_raw_js=pos_raw_js, spy_daily=spy_daily)
 
     print('GitHub Actions: report salvato in docs/')

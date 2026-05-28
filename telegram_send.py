@@ -67,6 +67,25 @@ def build_testo(pa):
     if not pa:
         return 'Nessuna posizione aperta al momento.\n\n' + GITHUB_PAGES_URL
 
+    if pa.get('filtrato_ma'):
+        ma  = pa['ma_periodi']
+        spy = pa.get('spy_prezzo')
+        mav = pa.get('spy_ma')
+        spy_line = f'📉  SPY oggi:  ${spy:,.2f}\n📊  MA{ma}:      ${mav:,.2f}' if spy and mav else ''
+        return (
+            f'━━━━━━━━━━━━━━━━━━━━━━━\n'
+            f'📊 ETF AVERAGE — {pa["data_acquisto"][:7]}\n'
+            f'━━━━━━━━━━━━━━━━━━━━━━━\n'
+            f'\n'
+            f'🚫  Filtro MA{ma} attivo — nessuna posizione\n'
+            f'\n'
+            + (spy_line + '\n\n' if spy_line else '')
+            + f'Il sistema non opera finché SPY è sotto\n'
+            f'la media mobile a {ma} periodi daily.\n'
+            f'\n'
+            f'🌐 Report completo: {GITHUB_PAGES_URL}'
+        )
+
     guadagno  = pa['valore_attuale'] - pa['capitale_investito']
     rend      = pa['ritorno_parziale']
     rend_icon = '📈' if rend >= 0 else '📉'

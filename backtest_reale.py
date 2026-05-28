@@ -323,6 +323,20 @@ def calcola_posizione_aperta(data, risultati):
     d_lookback = d_acquisto - relativedelta(months=LOOKBACK_MESI)
     capitale_corrente = risultati[-1]['capitale_fine']
 
+    # ── 0. Filtro SP500 MA sul mese corrente ──────────────────────────────
+    if MA_SP500_PERIODI > 0:
+        spy_pr = prezzo_alla_data(data, 'SPY', d_acquisto)
+        spy_ma = calcola_ma_spy(data, d_acquisto, MA_SP500_PERIODI)
+        if spy_pr is None or spy_ma is None or spy_pr < spy_ma:
+            return {
+                'filtrato_ma':  True,
+                'ma_periodi':   MA_SP500_PERIODI,
+                'spy_prezzo':   round(spy_pr, 2) if spy_pr is not None else None,
+                'spy_ma':       round(spy_ma, 2) if spy_ma is not None else None,
+                'data_acquisto': d_acquisto.strftime('%Y-%m-%d'),
+                'data_oggi':    DATA_OGGI.strftime('%Y-%m-%d'),
+            }
+
     # ── 1. Miglior ETF singolo ────────────────────────────────────────────
     etf_ritorni = {}
     for etf in ETF_UNIVERSE:
@@ -1863,27 +1877,29 @@ if __name__ == '__main__':
         sys.exit(1)
 
     pos_aperta = calcola_posizione_aperta(data, risultati)
+    # pos_per_chart = None when MA filter is active (no real position to display)
+    pos_per_chart = pos_aperta if (pos_aperta and not pos_aperta.get('filtrato_ma')) else None
 
     # equity curve
     equity_vals = [r['capitale_inizio'] for r in risultati]
     equity_vals.append(risultati[-1]['capitale_fine'])
-    if pos_aperta:
-        equity_vals.append(pos_aperta['valore_attuale'])
+    if pos_per_chart:
+        equity_vals.append(pos_per_chart['valore_attuale'])
 
     drawdown_vals, max_dd = calcola_drawdown(equity_vals)
 
     cap_labs = [r['data'][:7] for r in risultati]
     cap_labs.append(DATA_FINE.strftime('%Y-%m'))
-    if pos_aperta:
+    if pos_per_chart:
         cap_labs.append(DATA_OGGI.strftime('%Y-%m-%d'))
 
     cap_vals = [r['capitale_inizio'] for r in risultati]
     cap_vals.append(risultati[-1]['capitale_fine'])
-    if pos_aperta:
-        cap_vals.append(pos_aperta['valore_attuale'])
+    if pos_per_chart:
+        cap_vals.append(pos_per_chart['valore_attuale'])
 
     sp500_vals    = get_sp500_normalizzato(data, cap_labs, stats['cap_iniziale'])
-    ticker_charts = build_ticker_charts(data, risultati, pos_aperta)
+    ticker_charts = build_ticker_charts(data, risultati, pos_per_chart)
     perf_matrix, annual_returns = build_perf_matrix(risultati)
     spy_daily     = build_spy_daily(data)
 
@@ -1916,18 +1932,18 @@ if __name__ == '__main__':
 
     # Build POS_RAW
     pos_raw_js = None
-    if pos_aperta:
+    if pos_per_chart:
         pos_raw_js = {
-            'data_acquisto': pos_aperta['data_acquisto'],
-            'data_oggi':     pos_aperta['data_oggi'],
-            'etf':           pos_aperta.get('etf', ''),
-            'tutti_etf':     pos_aperta.get('tutti_etf', {}),
-            'stocks_all':    pos_aperta.get('stocks_all', []),
+            'data_acquisto': pos_per_chart['data_acquisto'],
+            'data_oggi':     pos_per_chart['data_oggi'],
+            'etf':           pos_per_chart.get('etf', ''),
+            'tutti_etf':     pos_per_chart.get('tutti_etf', {}),
+            'stocks_all':    pos_per_chart.get('stocks_all', []),
         }
 
     genera_html(risultati, stats, cap_labs, cap_vals, sp500_vals,
                 drawdown_vals, max_dd, ticker_charts, perf_matrix,
-                annual_returns, pos_aperta,
+                annual_returns, pos_per_chart,
                 mesi_raw_js=mesi_raw_js, sp500_norm_js=sp500_norm_js,
                 pos_raw_js=pos_raw_js, spy_daily=spy_daily)
 

@@ -16,10 +16,10 @@ import yfinance as yf
 
 # ── CLI arguments ─────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description='Backtest ETF Momentum')
-parser.add_argument('--n_titoli',  type=int,   default=4,     help='Numero titoli per mese (1-4)')
+parser.add_argument('--n_titoli',  type=int,   default=3,     help='Numero titoli per mese (1-4)')
 parser.add_argument('--capitale',  type=float, default=10000, help='Capitale per titolo (EUR)')
 parser.add_argument('--costo',     type=float, default=0.0,   help='Costo ingresso %% per trade (es. 0.1)')
-parser.add_argument('--ma_sp500',  type=int,   default=200,   help='Periodi MA daily SP500 per filtro entrate (0=disabilitato)')
+parser.add_argument('--ma_sp500',  type=int,   default=90,    help='Periodi MA daily SP500 per filtro entrate (0=disabilitato)')
 args = parser.parse_args()
 
 N_TITOLI            = max(1, min(4, args.n_titoli))
